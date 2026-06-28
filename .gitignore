@@ -1,0 +1,26 @@
+# caches / build
+__pycache__/
+*.pyc
+*.egg-info/
+build/
+dist/
+*.spec
+
+# runtime / sensitive — never commit accounts
+profiles/
+cookie*.json
+*.lock
+.locks/
+
+# tooling
+.playwright-mcp/
+*.log
+
+# external reference (not ours)
+biliTickerBuy-main/
+
+# IDE / junk
+.idea/
+test.txt
+settings.json
+*.png

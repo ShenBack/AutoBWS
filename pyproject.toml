@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autobws"
+version = "0.1.0"
+description = "B站 bw乐园抢票助手"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "curl_cffi>=0.13",
+    "qrcode>=8.0",
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.27",
+]
+
+[project.scripts]
+autobws = "main:main"
+
+[tool.setuptools]
+py-modules = ["main", "cli", "paths"]
+packages = ["core", "net", "utils", "web"]
