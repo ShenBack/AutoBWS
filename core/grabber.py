@@ -146,14 +146,18 @@ class AccountPacer:
         self.curve = pol.get("curve", "accel")
         self.thr = pol.get("throttle") or {"mode": "auto", "value": self.base}
         self.rsk = pol.get("risk") or {"mode": "auto", "value": 800}
+        self.risk_floor = max(self.base, _as_int((self.rsk or {}).get("value"), self.base))
         self.interval = float(self.base)
         self.streak = 0
+        self.risk_cool = 0
         self.lock = asyncio.Lock()
         self.next_ok = 0.0
         self.last_fire = 0.0
 
     def _slot(self) -> float:
-        return self.last_fire + self.interval / 1000.0 + random.uniform(0, self.jitter / 1000.0)
+        # 抖动只加在退避节奏上;最热的 relief 重试不加(单边抖动只会平白增延迟)
+        jit = random.uniform(0, self.jitter / 1000.0) if self.interval > self.relief else 0.0
+        return self.last_fire + self.interval / 1000.0 + jit
 
     async def gate(self) -> None:
         # 在锁内只确定开火时刻并预占下个槽(用当前 interval 维持错峰),锁外再 sleep。
@@ -181,8 +185,12 @@ class AccountPacer:
         return float(min(self.max, max(self.interval, floor) + step))
 
     def on_relief(self) -> None:
+        floor = self.relief
+        if self.risk_cool > 0:                 # 风控冷却期内,relief 不得砸破风控地板
+            floor = max(self.relief, self.risk_floor)
+            self.risk_cool -= 1
         self.streak = 0
-        self.interval = float(self.relief)
+        self.interval = float(floor)
 
     def on_throttle(self) -> None:
         self.streak += 1
@@ -190,6 +198,7 @@ class AccountPacer:
 
     def on_risk(self) -> None:
         self.streak += 1
+        self.risk_cool = 2
         self.interval = self._backoff(self.rsk)
 
     def on_neterr(self) -> None:
@@ -231,12 +240,17 @@ class AccountCtx:
     def has_alt(self) -> bool:
         return len(self.pool) > 1
 
-    def report(self, *, hard_throttle: bool, at_max: bool, net_error: bool) -> None:
-        self.net_fail = self.net_fail + 1 if net_error else 0
+    def report(self, *, hard_throttle: bool = False, at_max: bool = False,
+               net_error: bool = False, good: bool = False) -> None:
+        # 失败累积、互不清零(交替失败也能攒够切换信号);仅"好响应"衰减
+        if good:
+            self.net_fail = max(0, self.net_fail - 1)
+            self.maxed = max(0, self.maxed - 1)
+            return
+        if net_error:
+            self.net_fail += 1
         if hard_throttle and at_max:
             self.maxed += 1
-        elif not hard_throttle:
-            self.maxed = 0
 
     def reason_to_switch(self) -> str | None:
         if not self.has_alt:
@@ -385,7 +399,7 @@ async def grab_one(job: GrabJob, clock: ServerClock, ctx: AccountCtx, pacer: Acc
                 p["phase"] = "抢票中"          # 不暂停:中性继续,不触碰账号级共享 pacer/ctx
             elif pace_cat == "relief":
                 pacer.on_relief()
-                ctx.report(hard_throttle=False, at_max=False, net_error=net_error)
+                ctx.report(good=True)          # 拥挤=通道在开,视为好响应,衰减切换计数
                 p["phase"] = "抢票中"
             elif pace_cat == "risk":
                 pacer.on_risk()

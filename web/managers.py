@@ -171,6 +171,8 @@ class GrabManager:
                 await clock.sync()
             finally:
                 await sc.aclose()
+            if getattr(clock, "source", None) == "local":
+                _console("[警告] 未能校时(NTP/B站均失败),改用本地墙钟,开抢时刻可能有偏差")
 
             logbuf: deque = deque(maxlen=500)
             names_label = " · ".join(p.name for p in ok)
