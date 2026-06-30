@@ -19,7 +19,8 @@ def _build(scheme: str, host: str, port: str, user: str = "", pwd: str = "") -> 
     if scheme == "socks5":
         scheme = "socks5h"
     auth = f"{quote(user, safe='')}:{quote(pwd, safe='')}@" if user else ""
-    return f"{scheme}://{auth}{host}:{port}"
+    h = f"[{host}]" if ":" in host else host        # IPv6 字面量需方括号
+    return f"{scheme}://{auth}{h}:{port}"
 
 
 def parse_proxy(raw: str | None) -> str | None:
@@ -95,4 +96,5 @@ def proxy_label(normalized: str | None) -> str:
         return "直连"
     sp = urlsplit(normalized)
     auth = "*:*@" if sp.username else ""
-    return f"{sp.scheme}://{auth}{sp.hostname}:{sp.port}"
+    h = f"[{sp.hostname}]" if sp.hostname and ":" in sp.hostname else sp.hostname
+    return f"{sp.scheme}://{auth}{h}:{sp.port}"

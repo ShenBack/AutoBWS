@@ -175,10 +175,12 @@ class GrabManager:
                 _console("[警告] 未能校时(NTP/B站均失败),改用本地墙钟,开抢时刻可能有偏差")
 
             logbuf: deque = deque(maxlen=500)
+            log_seq = [0]
             names_label = " · ".join(p.name for p in ok)
 
             def _notify(m):
                 logbuf.append(m)
+                log_seq[0] += 1
                 _console(f"[抢票] {m}")
 
             tg = ThreadedGrab(jobs, clock, account_opts=account_opts, notify=_notify, refresh=True)
@@ -189,8 +191,8 @@ class GrabManager:
         _console(f"[抢票] 开始 {names_label} · {len(jobs)} 场次 · {clock.describe()}")
         gid = _tok()
         self.jobs[gid] = {"id": gid, "tg": tg, "clock": clock, "locks": locks,
-                          "log": logbuf, "names": [p.name for p in ok], "skipped": skipped,
-                          "started": time.time()}
+                          "log": logbuf, "log_seq": log_seq, "names": [p.name for p in ok],
+                          "skipped": skipped, "started": time.time()}
         _spawn(self._supervise(gid))
         return {"id": gid, "names": [p.name for p in ok], "skipped": skipped,
                 "clock": clock.describe()}
@@ -249,8 +251,9 @@ class GrabManager:
             return
         snap = self.snapshot(gid)
         snap["state"] = "done"
+        if self.jobs.pop(gid, None) is None:      # 原子认领;若已被 stop() 拿走则不重复 teardown
+            return
         await asyncio.to_thread(self._teardown, j)
-        self.jobs.pop(gid, None)
         self.finished[gid] = {"snap": snap, "names": j["names"], "ts": time.time()}
         _console(f"[抢票] 结束 {' · '.join(j['names'])}")
 
@@ -274,7 +277,7 @@ class GrabManager:
             "rows": [{k: r.get(k) for k in ("account", "reserve_id", "title", "date", "begin", "proxy",
                                             "phase", "attempts", "interval", "code", "msg",
                                             "done", "ok", "result")} for r in rows],
-            "log": log,
+            "log": log, "log_seq": j.get("log_seq", [0])[0],
         }
 
     def stop(self, gid: str) -> dict:
@@ -287,13 +290,13 @@ class GrabManager:
 
     def _reap(self) -> None:
         now = time.time()
-        for gid in [g for g, f in self.finished.items() if now - f["ts"] > 1800]:
+        for gid in [g for g, f in list(self.finished.items()) if now - f["ts"] > 1800]:
             self.finished.pop(gid, None)
 
     def list(self) -> list:
         self._reap()
-        out = [{"id": gid, "names": j["names"], "done": False} for gid, j in self.jobs.items()]
-        out += [{"id": gid, "names": f["names"], "done": True} for gid, f in self.finished.items()]
+        out = [{"id": gid, "names": j["names"], "done": False} for gid, j in list(self.jobs.items())]
+        out += [{"id": gid, "names": f["names"], "done": True} for gid, f in list(self.finished.items())]
         return out
 
     def stop_all(self) -> None:

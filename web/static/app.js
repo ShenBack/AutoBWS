@@ -12,7 +12,7 @@ window.__app = createApp({
       bindOk: null, bindChecking: false, bind: { name: '', id_type: 0, personal_id: '', ticket4: '' }, binding: false,
       sessions: [], selected: {}, sessQ: '', sessLoading: false,
       saving: false,
-      curGrab: null, snap: null, _ws: null, _wsClosing: false, _wsRetry: 0, _lastLogLen: 0, _wonIds: {}, _snapSeeded: false,
+      curGrab: null, snap: null, _ws: null, _wsClosing: false, _wsRetry: 0, _lastLogSeq: 0, _wonIds: {}, _snapSeeded: false,
       disp: { sent: 0, win: 0, relief: 0, risk: 0, throttle: 0, net: 0 },
       settle: null, _settleId: 0, _settleQueue: [], _settleTimers: [], _audioUnlocked: false,
       ticketProfile: '', tickets: null, ticketLoading: false,
@@ -70,7 +70,7 @@ window.__app = createApp({
     async loadMeta() { this.meta = await this.api('/api/meta') || this.meta; if (!this.draft.impersonate) this.draft.impersonate = this.meta.default_impersonate },
     async loadProfiles() { this.profiles = await this.api('/api/profiles') || [] },
     async refreshGrabs() { this.grabs = await this.api('/api/grab') || [] },
-    async delProfile(name) { if (!confirm(`删除配置「${name}」?`)) return; await this.api(`/api/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' }); this.toast(`已删除「${name}」`, 'ok'); this.loadProfiles() },
+    async delProfile(name) { if (!confirm(`删除配置「${name}」?`)) return; const r = await this.api(`/api/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' }); if (r && r.ok) { this.toast(`已删除「${name}」`, 'ok'); this.loadProfiles() } else this.toast('删除失败', 'err') },
 
     newProfile() {
       this.editing = false; this.origName = null; this.loginId = null; this.loggedIn = false; this.account = null
@@ -231,7 +231,7 @@ window.__app = createApp({
     },
     openMonitor(gid) {
       this.curGrab = gid; this.snap = null; this.disp = { sent: 0, win: 0, relief: 0, risk: 0, throttle: 0, net: 0 }
-      this._wonIds = {}; this._snapSeeded = false; this._lastLogLen = 0; this._wsClosing = false; this._wsRetry = 0
+      this._wonIds = {}; this._snapSeeded = false; this._lastLogSeq = 0; this._wsClosing = false; this._wsRetry = 0
       this.go('monitor'); this.connectWS(gid)
     },
     connectWS(gid) {
@@ -247,20 +247,21 @@ window.__app = createApp({
       this._ws = ws
     },
     handleSnap(s) {
-      const rows = s.rows || [], log = s.log || []
+      const rows = s.rows || [], log = s.log || [], seq = (s.log_seq != null ? s.log_seq : log.length)
       if (!this._snapSeeded) {
         this._snapSeeded = true
         for (const r of rows) if (r.ok) this._wonIds[r.account + '#' + r.reserve_id] = true
-        this._lastLogLen = log.length
+        this._lastLogSeq = seq
         return
       }
       for (const r of rows) { const k = r.account + '#' + r.reserve_id; if (r.ok && !this._wonIds[k]) { this._wonIds[k] = true; this.showSettle(r) } }
-      for (let i = this._lastLogLen; i < log.length; i++) {
+      const fresh = Math.max(0, Math.min(seq - this._lastLogSeq, log.length))   // 按绝对序号diff,兼容滑动窗
+      for (let i = log.length - fresh; i < log.length; i++) {
         const l = log[i]
         if (l.includes('切换代理')) this.toast(l, 'warn')
         else if (l.includes('异常') || l.includes('失败') || l.includes('跳过')) this.toast(l, 'warn')
       }
-      this._lastLogLen = log.length
+      this._lastLogSeq = seq
     },
     showSettle(row) {
       if (!this.settings.settle_enabled) { this.toast(`抢中 ${row.account} · ${row.title}`, 'ok'); return }

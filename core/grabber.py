@@ -295,6 +295,18 @@ def _job_offset_ms(job) -> int:
     return 50 if job.offset_ms == "auto" else int(job.offset_ms)
 
 
+def _warm_action(remaining_ms, since_warm_s, auto: bool, measured: bool) -> str | None:
+    # 决定蹲点最后阶段做什么:measure(测RTT) / warm(保活) / None。
+    # 下限保护:不在最后 300ms 内预热/测量,避免压过开闸把首包发晚(测量需 >800ms 余量)。
+    if not (remaining_ms < 3000 and since_warm_s >= 1.0):
+        return None
+    if auto and not measured and remaining_ms > 800:
+        return "measure"
+    if remaining_ms > 300:
+        return "warm"
+    return None
+
+
 async def _measure_offset(client, n: int = 3) -> tuple[int, float | None]:
     rtts = []
     for _ in range(n):
@@ -349,19 +361,20 @@ async def grab_one(job: GrabJob, clock: ServerClock, ctx: AccountCtx, pacer: Acc
             remaining = target_ms - clock.now_ms()
             if remaining <= 0:
                 break
-            if remaining < 3000 and time.monotonic() - last_warm >= 1.0:   # 最后3秒每~1s补热一次
-                if auto_off and not measured:
-                    off, rtt = await _measure_offset(client)   # 首次预热顺带测 RTT 定提前量
-                    target_ms = sess["begin"] * 1000 - off
-                    deadline_ms = end_ms if end_ms else target_ms + FALLBACK_GRAB_WINDOW_MS
-                    measured = True
-                    if rtt is not None:
-                        say(f"{job.account} · {sess['title'][:12]} 自动提前 {off}ms(RTT {round(rtt)}ms)")
-                else:
-                    try:
-                        await client.server_time(timeout=1)   # 保持连接热,首包不吃冷握手
-                    except Exception:
-                        pass
+            act = _warm_action(remaining, time.monotonic() - last_warm, auto_off, measured)
+            if act == "measure":
+                off, rtt = await _measure_offset(client)       # 首次预热顺带测 RTT 定提前量
+                target_ms = sess["begin"] * 1000 - off
+                deadline_ms = end_ms if end_ms else target_ms + FALLBACK_GRAB_WINDOW_MS
+                measured = True
+                if rtt is not None:
+                    say(f"{job.account} · {sess['title'][:12]} 自动提前 {off}ms(RTT {round(rtt)}ms)")
+                last_warm = time.monotonic()
+            elif act == "warm":
+                try:
+                    await client.server_time(timeout=1)        # 最后3秒每~1s补热,首包不吃冷握手
+                except Exception:
+                    pass
                 last_warm = time.monotonic()
             await asyncio.sleep(min((remaining - 50) / 1000.0, 0.2) if remaining > 60 else 0.002)
         if stop_event.is_set() or astop.stopped(date, typ):

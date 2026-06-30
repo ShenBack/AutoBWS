@@ -45,7 +45,8 @@ def _host_of(value: str | None) -> str:
         return ""
     from urllib.parse import urlparse
     h = value.split("://", 1)[-1] if "://" in value else value
-    return (urlparse("//" + h).hostname or h).split(":")[0].lower()
+    host = urlparse("//" + h).hostname            # 已去端口/去 IPv6 方括号,勿再 split(":")
+    return (host or h).lower()
 
 
 def _local_host(value: str | None) -> bool:
@@ -151,7 +152,7 @@ async def save_profile(body: dict):
     prof.face = info.get("face", "") or prof.face
     prof.impersonate = body.get("impersonate", DEFAULT_IMPERSONATE)
     prof.cookies = cookies
-    if body.get("proxies") is not None:
+    if isinstance(body.get("proxies"), list):
         prof.proxies = list(body["proxies"])
     prof.fallback_direct = bool(body.get("fallback_direct", True))
     prof.base_interval = _int(body.get("base_interval"), prof.base_interval)
@@ -161,20 +162,20 @@ async def save_profile(body: dict):
         prof.stop_policy = profiles._coerce_stop_policy(body["stop_policy"])
     if body.get("pace_policy") is not None:
         prof.pace_policy = profiles._coerce_pace_policy(body["pace_policy"], prof.base_interval)
-    if body.get("sessions") is not None:
-        prof.sessions = [session_snapshot(o) for o in body["sessions"] if selectable(o)]
+    if isinstance(body.get("sessions"), list):
+        prof.sessions = [session_snapshot(o) for o in body["sessions"] if isinstance(o, dict) and selectable(o)]
 
-    known = {orig, existing.name if existing else None}
+    sn = profiles._safe_name
+    own = {sn(x) for x in (orig, existing.name if existing else None) if x}
+    ex = set(profiles.list_profiles()) - own          # 其它配置的文件名 stem
     final = name
-    if final not in known:
-        ex = set(profiles.list_profiles()) - {x for x in known if x}
-        if final in ex:
-            i = 2
-            while f"{final}_{i}" in ex:
-                i += 1
-            final = f"{final}_{i}"
+    if sn(final) in ex:                               # 按净化后的文件名判冲突,避免静默覆盖
+        i = 2
+        while sn(f"{name}_{i}") in ex:
+            i += 1
+        final = f"{name}_{i}"
     prof.name = final
-    if orig and orig != final and orig in profiles.list_profiles():
+    if orig and sn(orig) != sn(final) and sn(orig) in set(profiles.list_profiles()):
         profiles.delete(orig)
     profiles.save(prof)
     return {"ok": True, "name": final, "renamed": final != name}
@@ -202,7 +203,7 @@ async def _bind(cookies, impersonate, body):
     name = (body.get("name") or "").strip()
     pid = (body.get("personal_id") or "").strip()
     tk4 = (body.get("ticket4") or "").strip()
-    idt = int(body.get("id_type", 0))
+    idt = _int(body.get("id_type"), 0)
     if not (name and pid and len(tk4) == 4):
         return {"ok": False, "message": "姓名/证件号不能为空,票号必须后4位"}
     c = BwsClient(cookies, impersonate)
@@ -300,7 +301,8 @@ async def prof_proxy_check(name: str, body: dict | None = None):
         return JSONResponse({"error": "配置不存在或已损坏"}, status_code=404)
     if not p.proxies:
         return JSONResponse({"error": "没有配置代理"}, status_code=400)
-    conc = (body or {}).get("concurrency") or settings_store.load().get("proxy_concurrency", 40)
+    conc = _int((body or {}).get("concurrency"), 0) or settings_store.load().get("proxy_concurrency", 40)
+    conc = min(max(1, _int(conc, 40)), 500)
     r = await proxy_chk.start(p.proxies, p.impersonate, profile_name=name, concurrency=conc)
     return r
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 
 from paths import ROOT
 
@@ -32,5 +33,10 @@ def save(s: dict) -> dict:
     for k, v in (s or {}).items():
         if k in DEFAULTS:
             cur[k] = v
-    SETTINGS_FILE.write_text(json.dumps(cur, ensure_ascii=False, indent=2), encoding="utf-8")
+    tmp = SETTINGS_FILE.with_suffix(".json.tmp")
+    with open(tmp, "w", encoding="utf-8") as f:       # 原子写:临时文件 → fsync → 替换,避免写一半崩溃丢设置
+        f.write(json.dumps(cur, ensure_ascii=False, indent=2))
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, SETTINGS_FILE)
     return cur
