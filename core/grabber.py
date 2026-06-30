@@ -574,24 +574,32 @@ class ThreadedGrab:
                     self.notify(f"切换代理 {account}(测活失效)→ {ctx.label}")
 
     async def _reconcile(self, account: str, ajobs: list[GrabJob], ctx: AccountCtx) -> None:
-        # 中签核对:抓完后,对"未中"的场次查 reserve_info,state==4(已预约)说明其实已抢到
-        # (丢 ack / 响应截断会让真中签被记成 76647/没中,这里翻正)。state==4 是权威信号。
+        # 中签核对:抓完后,对"未中"的场次查 myreserve(本账号已预约的场次列表,按 reserve_id)。
+        # 命中说明其实已抢到 —— 翻正"丢 ack / 响应截断把真中签记成 76647/没中"。按 reserve_id
+        # 逐场次匹配(state==4 是单场次级信号,不是账号级),真·达上限不会被误翻。
         pending = [j for j in ajobs if not self.progress[j.key].get("ok")]
         if not pending:
             return
         try:
             client = BwsClient(ajobs[0].cookies, ajobs[0].impersonate, ctx.proxy)
             try:
-                opts = await collect_sessions(client)
+                resp = await client.my_reserve()
             finally:
                 await client.aclose()
         except Exception:
             return
-        by_id = {o.get("reserve_id"): o for o in opts}
+        if not isinstance(resp, dict) or resp.get("code") != 0:
+            return
+        reserved = set()
+        for sessions in ((resp.get("data") or {}).get("reserve_list") or {}).values():
+            if isinstance(sessions, dict):
+                sessions = [sessions]
+            for s in (sessions or []):
+                if isinstance(s, dict) and s.get("reserve_id") is not None:
+                    reserved.add(s.get("reserve_id"))
         stats = self.stats[account]
         for j in pending:
-            o = by_id.get(j.sess.get("reserve_id"))
-            if o and o.get("state") == 4:
+            if j.sess.get("reserve_id") in reserved:
                 self.progress[j.key].update(ok=True, done=True, phase="抢中", result="已抢中(核对确认)")
                 stats["win"] += 1
                 if self.notify:
