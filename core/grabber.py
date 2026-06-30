@@ -541,6 +541,7 @@ class ThreadedGrab:
         if ctx.has_alt:
             tasks.append(self._liveness(account, ajobs, ctx, astop))
         await asyncio.gather(*tasks, return_exceptions=True)
+        await self._reconcile(account, ajobs, ctx)
 
     async def _liveness(self, account: str, ajobs: list[GrabJob], ctx: AccountCtx, astop: AccountStop) -> None:
         keys = [j.key for j in ajobs]
@@ -571,6 +572,30 @@ class ThreadedGrab:
                 fails = 0
                 if self.notify:
                     self.notify(f"切换代理 {account}(测活失效)→ {ctx.label}")
+
+    async def _reconcile(self, account: str, ajobs: list[GrabJob], ctx: AccountCtx) -> None:
+        # 中签核对:抓完后,对"未中"的场次查 reserve_info,state==4(已预约)说明其实已抢到
+        # (丢 ack / 响应截断会让真中签被记成 76647/没中,这里翻正)。state==4 是权威信号。
+        pending = [j for j in ajobs if not self.progress[j.key].get("ok")]
+        if not pending:
+            return
+        try:
+            client = BwsClient(ajobs[0].cookies, ajobs[0].impersonate, ctx.proxy)
+            try:
+                opts = await collect_sessions(client)
+            finally:
+                await client.aclose()
+        except Exception:
+            return
+        by_id = {o.get("reserve_id"): o for o in opts}
+        stats = self.stats[account]
+        for j in pending:
+            o = by_id.get(j.sess.get("reserve_id"))
+            if o and o.get("state") == 4:
+                self.progress[j.key].update(ok=True, done=True, phase="抢中", result="已抢中(核对确认)")
+                stats["win"] += 1
+                if self.notify:
+                    self.notify(f"{account} · {j.sess.get('title', '')[:12]} 核对确认已抢中")
 
     def stat_totals(self) -> dict:
         total: Counter = Counter()

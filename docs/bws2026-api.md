@@ -77,6 +77,7 @@ GET /x/activity/bws/online/park/reserve/info?reserve_date=20260710,20260711,2026
   "reserve_location":"5.1H馆丨《光与夜之恋》官方展位",
   "next_reserve":{"reserve_begin_time":0,"reserve_end_time":0,"is_vip_ticket":0} }
 ```
+- **`state` 含义**(逆向自前端 `stateText`/`dataState`,`index.af9660b5.js`):`1`/`6`=暂未开放、`2`=可预约(`isFull` 则已约满)、`3`=预约结束、**`4`=已预约(本账号已抢中该场次)**、`5`=已售完。**`state==4` 是判断"是否已抢中"的权威信号。**(`dataState = state==6 ? 1 : state`,仅显示层把 6 当 1。)
 
 ## 4. 抢票发包(预约场次)
 ```
@@ -91,13 +92,15 @@ body: inter_reserve_id=<场次 reserve_id> ticket_no=<完整票号(来自 user_t
   - `76647` 预约数已达上限(该 **账号+日期+类型** 当天额度满:活动 5/天、商品 1/天;同桶其它场次会照样 76647,**别的日期/类型不受影响**)
   - `76650` 操作频繁
 - POST 编码:web 端 axios 默认 `application/x-www-form-urlencoded`;**去年脚本用 multipart/form-data 同样成功**(两者皆可)。
-- 未发现 ptoken / gaia 验证码挑战:风控仅以 412/火爆码体现,简单重试即可(与去年一致)。
+- 未发现 ptoken / gaia 验证码挑战:风控仅以 412/火爆码体现,简单重试即可(与去年一致)。页面初始化会调 `gaia-gateway/ExGetAxe`(B站通用风控初始化),但 reserve/do 本身未见挑战。
+- **前端 reserve callback 只识别**:`0`/`412`/`429`/`76651`/`-702`/`75574`/`76647`/`76650`,**无"已预约该场次"专用码**。因此判断"是否真抢到"应查 `reserve_info`/`myreserve` 的 **`state==4`**,而不是靠重发 reserve/do。这正是"丢 ack 误判没中"的核对依据(见下)。
 
-## 5. 我的预约
+## 5. 我的预约 — ✅ 逆向自前端 `reserveHandle`/`myReserve`
 ```
 GET /x/activity/bws/online/park/myreserve?year=202601&csrf=<bili_jct>
-→ {"code":0,"data":{"reserve_list":{}}}    // 空=未预约
+→ {"code":0,"data":{"reserve_list":{ "<date>": [ <场次对象,同 reserve_list,含 reserve_id 与 state==4> ] }}}
 ```
+- `data.reserve_list[date]` = 该日**已预约的场次数组**;无则该 key 缺失/空数组。可用它(或 reserve_info 里该场次 `state==4`)确认某 reserve_id 是否真已抢中 —— **中签核对**的依据。
 
 ## 6. 服务器时间(蹲点校准)
 ```
