@@ -29,3 +29,4 @@ settings.json
 # tests & archived legacy UI — kept local, not shipped to the repo
 tests/
 legacy/
+venv
