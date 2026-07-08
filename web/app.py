@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import csv
+import io
 import os
 from contextlib import asynccontextmanager
 
@@ -116,7 +118,7 @@ def list_profiles():
 
 @app.get("/api/profiles/{name}")
 def get_profile(name: str):
-    p = profiles.load(name) if name in profiles.list_profiles() else None
+    p = profiles.load(name)
     if p is None:
         return JSONResponse({"error": "配置不存在或已损坏"}, status_code=404)
     d = brief(p)
@@ -130,13 +132,26 @@ def delete_profile(name: str):
     return {"ok": True}
 
 
+@app.post("/api/profiles/clear-proxies")
+def clear_proxies_batch(body: dict):
+    names = [n for n in (body.get("names") or []) if isinstance(n, str)]
+    changed = 0
+    for n in names:
+        p = profiles.load(n)
+        if p and p.proxies:
+            p.proxies = []
+            profiles.save(p)
+            changed += 1
+    return {"ok": True, "changed": changed}
+
+
 @app.post("/api/profiles")
 async def save_profile(body: dict):
     name = (body.get("name") or "").strip()
     if not name:
         return JSONResponse({"error": "配置名不能为空"}, status_code=400)
     orig = body.get("orig_name")
-    existing = profiles.load(orig) if (orig and orig in profiles.list_profiles()) else None
+    existing = profiles.load(orig) if orig else None
 
     cookies = login_mgr.cookies_of(body["login_id"]) if body.get("login_id") else None
     if not cookies and existing:
@@ -158,6 +173,8 @@ async def save_profile(body: dict):
     prof.base_interval = _int(body.get("base_interval"), prof.base_interval)
     if body.get("offset") is not None:
         prof.offset = profiles._coerce_offset(body["offset"])
+    if body.get("grab_window_ms") is not None:
+        prof.grab_window_ms = max(1000, _int(body["grab_window_ms"], prof.grab_window_ms))
     if body.get("stop_policy") is not None:
         prof.stop_policy = profiles._coerce_stop_policy(body["stop_policy"])
     if body.get("pace_policy") is not None:
@@ -224,6 +241,35 @@ async def _sessions(cookies, impersonate):
         await c.aclose()
 
 
+async def _my_reserve(cookies, impersonate):
+    c = BwsClient(cookies, impersonate)
+    try:
+        r = await c.my_reserve()
+        code = r.get("code")
+        if code != 0:
+            return {"ok": False, "code": code, "message": r.get("message", "拉取失败"), "list": []}
+        data = r.get("data") or {}
+        items = data.get("reserve_list") or []
+        out = []
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            out.append({
+                "reserve_id": it.get("reserve_id"),
+                "title": it.get("act_title") or it.get("sku_name") or "(无标题)",
+                "type_name": "商品场次" if it.get("reserve_type") == 1 else "活动场次",
+                "date": it.get("reserve_date") or "",
+                "act_begin": it.get("act_begin_time") or 0,
+                "act_end": it.get("act_end_time") or 0,
+                "begin": it.get("reserve_begin_time") or 0,
+                "location": it.get("reserve_location") or "",
+            })
+        out.sort(key=lambda o: (o["date"], o["begin"] or 0, o["reserve_id"] or 0))
+        return {"ok": True, "list": out}
+    finally:
+        await c.aclose()
+
+
 def _login_ctx(sid):
     st = login_mgr.sessions.get(sid)
     return (st["cookies"], st["impersonate"]) if st and st.get("cookies") else (None, None)
@@ -253,14 +299,22 @@ async def login_sessions(sid: str):
     return await _sessions(cookies, imp)
 
 
+@app.get("/api/login/{sid}/my-reserve")
+async def login_my_reserve(sid: str):
+    cookies, imp = _login_ctx(sid)
+    if not cookies:
+        return JSONResponse({"error": "未登录"}, status_code=400)
+    return await _my_reserve(cookies, imp)
+
+
 def _prof_ctx(name):
-    p = profiles.load(name) if name in profiles.list_profiles() else None
+    p = profiles.load(name)
     return (p.cookies, p.impersonate) if p else (None, None)
 
 
 @app.get("/api/profiles/{name}/account")
 async def prof_account(name: str):
-    p = profiles.load(name) if name in profiles.list_profiles() else None
+    p = profiles.load(name)
     if p is None or not p.cookies:
         return JSONResponse({"error": "无 cookie"}, status_code=400)
     info = await login.fetch_user_info(p.cookies, impersonate=p.impersonate)
@@ -294,9 +348,17 @@ async def prof_sessions(name: str):
     return await _sessions(cookies, imp)
 
 
+@app.get("/api/profiles/{name}/my-reserve")
+async def prof_my_reserve(name: str):
+    cookies, imp = _prof_ctx(name)
+    if not cookies:
+        return JSONResponse({"error": "无 cookie"}, status_code=400)
+    return await _my_reserve(cookies, imp)
+
+
 @app.post("/api/profiles/{name}/proxy-check")
 async def prof_proxy_check(name: str, body: dict | None = None):
-    p = profiles.load(name) if name in profiles.list_profiles() else None
+    p = profiles.load(name)
     if p is None:
         return JSONResponse({"error": "配置不存在或已损坏"}, status_code=404)
     if not p.proxies:
@@ -417,7 +479,73 @@ async def prof_tickets(name: str):
                  "stock": o.get("stock"), "total": o.get("total"),
                  "ticket_no": o.get("ticket_no"), "reserved": o["reserve_id"] in reserved}
                 for o in opts]
-    return {"sessions": sessions}
+    my_reserves = [s for s in sessions if s["reserved"]]
+    return {"sessions": sessions, "my_reserves": my_reserves}
+
+
+async def _export_one(p: Profile):
+    if not p.cookies:
+        return []
+    c = BwsClient(p.cookies, p.impersonate)
+    try:
+        r = await c.my_reserve()
+        if r.get("code") != 0:
+            return []
+        data = r.get("data") or {}
+        groups = data.get("reserve_list") or {}
+        out = []
+        for date_key, items in (groups.items() if isinstance(groups, dict) else {None: groups or []}.items()):
+            if not isinstance(items, list):
+                continue
+            for it in items:
+                if not isinstance(it, dict):
+                    continue
+                date = str(date_key) if date_key else str(it.get("screen_date") or "")
+                out.append({
+                    "profile_name": p.name,
+                    "account": p.uname or p.name,
+                    "uid": p.uid,
+                    "reserve_id": it.get("reserve_id"),
+                    "type_name": "商品场次" if it.get("reserve_type") == 1 else "活动场次",
+                    "date": date,
+                    "title": it.get("act_title") or it.get("sku_name") or "(无标题)",
+                    "location": it.get("reserve_location") or "",
+                    "act_begin": it.get("act_begin_time") or 0,
+                    "act_end": it.get("act_end_time") or 0,
+                    "begin": it.get("reserve_begin_time") or 0,
+                    "ticket_no": it.get("ticket_no") or "",
+                })
+        return out
+    finally:
+        await c.aclose()
+
+
+@app.get("/api/export/reserves")
+async def export_reserves():
+    profs = profiles.load_all()
+    results = await asyncio.gather(*[_export_one(p) for p in profs], return_exceptions=True)
+    rows = []
+    for r in results:
+        if isinstance(r, list):
+            rows.extend(r)
+    rows.sort(key=lambda o: (o["profile_name"], o["date"], o["begin"] or 0, o["reserve_id"] or 0))
+    buf = io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["配置名", "账号", "UID", "场次ID", "类型", "日期", "场次/商品", "地点", "活动时间", "开抢时间", "票号"])
+    for o in rows:
+        def _ts(t):
+            if not t:
+                return ""
+            from datetime import datetime
+            return datetime.fromtimestamp(t).strftime("%m-%d %H:%M")
+        w.writerow([
+            o["profile_name"], o["account"], o["uid"], o["reserve_id"], o["type_name"],
+            o["date"], o["title"], o["location"],
+            _ts(o["act_begin"]), _ts(o["begin"]), o["ticket_no"],
+        ])
+    from fastapi.responses import Response
+    return Response(buf.getvalue().encode("utf-8-sig"), media_type="text/csv; charset=utf-8-sig",
+                    headers={"Content-Disposition": "attachment; filename=reserves.csv"})
 
 
 if MUSIC.exists():

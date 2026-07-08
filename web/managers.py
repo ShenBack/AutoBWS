@@ -264,15 +264,17 @@ class GrabManager:
             return dict(fin["snap"]) if fin else {"state": "gone"}
         tg, clock = j["tg"], j["clock"]
         try:
-            rows = sorted(tg.progress.values(), key=lambda p: (p["account"], p["date"], p["reserve_id"] or 0))
+            rows = sorted(tg.progress.values(), key=lambda p: (p["begin"] or 0, p["account"], p["reserve_id"] or 0))
             stats = dict(tg.stat_totals())
             log = list(j["log"])[-60:]
         except Exception:
             rows, stats, log = list(tg.progress.values()), {}, list(j["log"])[-60:]
+        upcoming = [r for r in rows if not r.get("done") and r.get("phase") == "蹲点"]
+        cd_ms = max(0, min((r["begin"] * 1000 for r in upcoming), default=0) - clock.now_ms())
         return {
             "state": "done" if tg.all_done else "running",
             "names": j["names"], "skipped": j["skipped"], "clock_desc": clock.describe(),
-            "countdown_ms": max(0, tg.earliest_target - clock.now_ms()),
+            "countdown_ms": cd_ms,
             "stats": stats,
             "rows": [{k: r.get(k) for k in ("account", "reserve_id", "title", "date", "begin", "proxy",
                                             "phase", "attempts", "interval", "code", "msg",

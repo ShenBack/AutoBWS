@@ -95,6 +95,7 @@ class Profile:
     cookies: list = field(default_factory=list)
     base_interval: int = 300
     offset: "int | str" = "auto"
+    grab_window_ms: int = 5000
     sessions: list = field(default_factory=list)
     stop_policy: dict = field(default_factory=lambda: dict(_STOP_POLICY_DEFAULT))
     pace_policy: dict = field(default_factory=lambda: copy.deepcopy(_PACE_POLICY_DEFAULT))
@@ -120,6 +121,7 @@ def _coerce(d: dict) -> Profile:
     kw["stop_policy"] = _coerce_stop_policy(kw.get("stop_policy"))
     kw["pace_policy"] = _coerce_pace_policy(kw.get("pace_policy"), kw.get("base_interval", 300))
     kw["offset"] = _coerce_offset(kw.get("offset"))
+    kw["grab_window_ms"] = max(1000, _as_int(kw.get("grab_window_ms"), 5000))
     return Profile(**kw)
 
 

@@ -23,11 +23,27 @@ async def send_telegram(token: str, chat_id: str, text: str, proxy: str | None =
 async def send_webhook(url: str, payload: dict) -> tuple[bool, str]:
     if not url:
         return False, "缺少 webhook url"
+    text = f"{payload.get('title', '')}\n{payload.get('body', '')}".strip()
     try:
+        body = payload
+        if "open.feishu.cn" in url:
+            body = {"msg_type": "text", "content": {"text": text}}
+        elif "qyapi.weixin.qq.com" in url:
+            body = {"msgtype": "text", "text": {"content": text}}
+        elif "oapi.dingtalk.com" in url or "open-api.dingtalk.com" in url or "dingtalk" in url:
+            body = {"msgtype": "text", "text": {"content": text}}
         async with new_async_session("chrome131_android") as s:
-            r = await s.post(url, json=payload, timeout=12)
+            r = await s.post(url, json=body, timeout=12)
         code = getattr(r, "status_code", 0)
-        return 200 <= code < 300, f"HTTP {code}"
+        ok = 200 <= code < 300
+        if ok:
+            try:
+                data = r.json()
+            except Exception:
+                data = None
+            if isinstance(data, dict) and data.get("code") not in (None, 0, ""):
+                return False, f"{data.get('code')}: {data.get('msg', '')}"
+        return ok, f"HTTP {code}"
     except Exception as e:
         return False, f"{type(e).__name__}: {e}"
 

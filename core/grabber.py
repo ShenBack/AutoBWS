@@ -102,6 +102,7 @@ class GrabJob:
     sess: dict
     base_ms: int
     offset_ms: int
+    grab_window_ms: int = 5000
     stop_policy: dict = field(default_factory=lambda: {"success": "session", "soldout": "session", "limit": "daytype"})
     pace_policy: dict = field(default_factory=lambda: copy.deepcopy(_PACE_POLICY_DEFAULT))
 
@@ -114,6 +115,7 @@ def jobs_from_profile(profile) -> list[GrabJob]:
         out.append(GrabJob(key=f"{profile.name}#{s['reserve_id']}", account=profile.name,
                            cookies=profile.cookies, impersonate=profile.impersonate,
                            sess=dict(s), base_ms=profile.base_interval, offset_ms=profile.offset,
+                           grab_window_ms=max(1000, getattr(profile, "grab_window_ms", 5000)),
                            stop_policy=dict(getattr(profile, "stop_policy", None) or {}),
                            pace_policy=copy.deepcopy(getattr(profile, "pace_policy", None) or {})))
     return out
@@ -337,7 +339,8 @@ async def grab_one(job: GrabJob, clock: ServerClock, ctx: AccountCtx, pacer: Acc
         off = 50 if auto_off else int(job.offset_ms)
         target_ms = sess["begin"] * 1000 - off
         end_ms = sess["end"] * 1000 if sess["end"] else 0
-        deadline_ms = end_ms if end_ms else target_ms + FALLBACK_GRAB_WINDOW_MS
+        window_ms = max(1000, getattr(job, "grab_window_ms", FALLBACK_GRAB_WINDOW_MS))
+        deadline_ms = min(end_ms, target_ms + window_ms) if end_ms else target_ms + window_ms
 
         p["phase"] = "蹲点"
         last_warm = -1e9

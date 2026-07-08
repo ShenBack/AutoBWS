@@ -6,7 +6,7 @@ window.__app = createApp({
       view: 'console', profiles: [], grabs: [], meta: { impersonates: [], id_types: {}, default_impersonate: 'safari260_ios' },
       px: {},
       editing: false, origName: null, step: 0, maxStep: 0,
-      draft: { name: '新配置', impersonate: 'safari260_ios', fallback_direct: true, base_interval: 300, offset: 'auto', stop_policy: { success: 'session', soldout: 'session', limit: 'daytype' }, pace_policy: { relief_ms: 120, throttle: { mode: 'auto', value: 300 }, risk: { mode: 'auto', value: 800 }, curve: 'accel', max_ms: 1000, jitter_ms: 40 } },
+      draft: { name: '新配置', impersonate: 'safari260_ios', fallback_direct: true, base_interval: 300, offset: 'auto', grab_window_ms: 5000, stop_policy: { success: 'session', soldout: 'session', limit: 'daytype' }, pace_policy: { relief_ms: 120, throttle: { mode: 'auto', value: 300 }, risk: { mode: 'auto', value: 800 }, curve: 'accel', max_ms: 1000, jitter_ms: 40 } },
       pxInput: '', proxiesCount: 0,
       loginId: null, loggedIn: false, account: null, loginMsg: '正在准备登录环境…', loginCls: '', loginUrl: '', _loginPoll: null, _loginGen: 0,
       bindOk: null, bindChecking: false, bind: { name: '', id_type: 0, personal_id: '', ticket4: '' }, binding: false,
@@ -15,7 +15,8 @@ window.__app = createApp({
       curGrab: null, snap: null, _ws: null, _wsClosing: false, _wsRetry: 0, _lastLogSeq: 0, _wonIds: {}, _snapSeeded: false,
       disp: { sent: 0, win: 0, relief: 0, risk: 0, throttle: 0, net: 0 },
       settle: null, _settleId: 0, _settleQueue: [], _settleTimers: [], _audioUnlocked: false,
-      ticketProfile: '', tickets: null, ticketLoading: false,
+      ticketProfile: '', tickets: null, myReserves: null, ticketLoading: false,
+      bulkMode: false, selectedProfiles: [],
       settings: {
         proxy_concurrency: 40, settle_enabled: true, settle_music: '',
         notify_on_win: true, notify_on_done: false, notify_on_risk: false,
@@ -30,6 +31,8 @@ window.__app = createApp({
   },
   computed: {
     runningGrabs() { return this.grabs.filter(g => !g.done) },
+    selectedSet() { return new Set(this.selectedProfiles) },
+    allSelected() { return this.profiles.length > 0 && this.profiles.every(p => this.selectedSet.has(p.name)) },
     pxPlaceholder() { return this.editing && this.proxiesCount ? `已有 ${this.proxiesCount} 个 · 留空不改 · 填 None 清空` : '留空 = 直连' },
     pxHint() {
       const raw = this.pxInput.trim()
@@ -45,8 +48,11 @@ window.__app = createApp({
     },
     selCount() { return Object.keys(this.selected).filter(k => this.selected[k]).length },
     filteredSessions() {
+      const now = Math.floor(Date.now() / 1000)
+      let list = this.sessions.filter(o => (o.begin || 0) > now)
       const q = this.sessQ.trim().toLowerCase()
-      return q ? this.sessions.filter(o => (o.title + o.date + (o.location || '')).toLowerCase().includes(q)) : this.sessions
+      if (q) list = list.filter(o => (o.title + o.date + (o.location || '')).toLowerCase().includes(q))
+      return list
     },
     navHint() {
       if (this.step === 2) return '用「哔哩哔哩」App 扫码;扫不出可复制链接。已登录可「重新登录」换号。'
@@ -72,17 +78,38 @@ window.__app = createApp({
     async refreshGrabs() { this.grabs = await this.api('/api/grab') || [] },
     async delProfile(name) { if (!confirm(`删除配置「${name}」?`)) return; const r = await this.api(`/api/profiles/${encodeURIComponent(name)}`, { method: 'DELETE' }); if (r && r.ok) { this.toast(`已删除「${name}」`, 'ok'); this.loadProfiles() } else this.toast('删除失败', 'err') },
 
+    toggleSelect(name) {
+      const set = this.selectedSet
+      if (set.has(name)) set.delete(name)
+      else set.add(name)
+      this.selectedProfiles = Array.from(set)
+    },
+    toggleSelectAll() {
+      if (this.allSelected) this.selectedProfiles = []
+      else this.selectedProfiles = this.profiles.map(p => p.name)
+    },
+    async clearProxiesBatch() {
+      const names = this.selectedProfiles
+      if (!names.length) return
+      if (!confirm(`将 ${names.length} 个配置改为直连,确定?`)) return
+      const r = await this.api('/api/profiles/clear-proxies', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ names })
+      })
+      if (r && r.ok) { this.toast(`已清空 ${r.changed || names.length} 个代理`, 'ok'); this.bulkMode = false; this.selectedProfiles = []; this.loadProfiles() }
+      else this.toast('改直连失败: ' + (r && r.message ? r.message : ''), 'err')
+    },
+
     newProfile() {
       this.editing = false; this.origName = null; this.loginId = null; this.loggedIn = false; this.account = null
       this.bindOk = null; this.bindChecking = false; this.sessions = []; this.selected = {}; this.pxInput = ''; this.proxiesCount = 0; this.maxStep = 0
-      this.draft = { name: '新配置', impersonate: this.meta.default_impersonate, fallback_direct: true, base_interval: 300, offset: 'auto', stop_policy: this._defStopPolicy(), pace_policy: this._defPacePolicy() }
+      this.draft = { name: '新配置', impersonate: this.meta.default_impersonate, fallback_direct: true, base_interval: 300, offset: 'auto', grab_window_ms: 5000, stop_policy: this._defStopPolicy(), pace_policy: this._defPacePolicy() }
       this.loginMsg = '正在准备登录环境…'; this.loginCls = ''; this.loginUrl = ''
       this.go('wizard'); this.goStep(0)
     },
     async editProfile(name) {
       const p = await this.api(`/api/profiles/${encodeURIComponent(name)}`); if (!p || p.error) return
       this.editing = true; this.origName = name; this.loginId = null
-      this.draft = { name: p.name, impersonate: p.impersonate, fallback_direct: p.fallback_direct, base_interval: p.base_interval, offset: p.offset, stop_policy: p.stop_policy || this._defStopPolicy(), pace_policy: p.pace_policy || this._defPacePolicy() }
+      this.draft = { name: p.name, impersonate: p.impersonate, fallback_direct: p.fallback_direct, base_interval: p.base_interval, offset: p.offset, grab_window_ms: p.grab_window_ms || 5000, stop_policy: p.stop_policy || this._defStopPolicy(), pace_policy: p.pace_policy || this._defPacePolicy() }
       this.pxInput = ''; this.proxiesCount = p.proxies; this.selected = {}; this.sessions = []
       this.loggedIn = false; this.account = null; this.bindOk = null; this.maxStep = 5
       this.go('wizard'); this.goStep(0)
@@ -175,7 +202,7 @@ window.__app = createApp({
       const u = this.loginId ? `/api/login/${this.loginId}/sessions` : `/api/profiles/${encodeURIComponent(this.origName)}/sessions`
       const list = await this.api(u); this.sessLoading = false
       if (!Array.isArray(list)) { this.toast('拉取场次失败', 'err'); return }
-      this.sessions = list
+      this.sessions = list.sort((a, b) => (a.begin || 0) - (b.begin || 0) || (a.reserve_id || 0) - (b.reserve_id || 0))
       const sel = {}; (await this._existingReserveIds()).forEach(id => sel[id] = true); this.selected = sel
     },
     async _existingReserveIds() {
@@ -186,6 +213,7 @@ window.__app = createApp({
     isSel(id) { return !!this.selected[id] },
     toggleSession(o) { if (!o.ticket_no) return; this.selected[o.reserve_id] = !this.selected[o.reserve_id] },
     selectAllSessions() { const s = {}; this.sessions.forEach(o => { if (o.ticket_no) s[o.reserve_id] = true }); this.selected = s; this.toast(`已全选 ${Object.keys(s).length} 个`, 'ok') },
+    clearAllSessions() { this.selected = {}; this.toast('已取消全选', 'info') },
 
     _isClear(raw) { return ['-', '清空', '无', 'none', 'null'].includes((raw || '').trim().toLowerCase()) },
     proxiesPayload() {
@@ -345,9 +373,20 @@ window.__app = createApp({
     openTickets() { this.go('tickets'); if (!this.ticketProfile && this.profiles.length) this.ticketProfile = this.profiles[0].name; if (this.ticketProfile) this.loadTickets() },
     async loadTickets() {
       if (!this.ticketProfile) return
-      this.ticketLoading = true; this.tickets = null
+      this.ticketLoading = true; this.tickets = null; this.myReserves = null
       const r = await this.api(`/api/profiles/${encodeURIComponent(this.ticketProfile)}/tickets`)
-      this.ticketLoading = false; this.tickets = (r && r.sessions) || []
+      this.ticketLoading = false; this.tickets = (r && r.sessions) || []; this.myReserves = (r && r.my_reserves) || []
+    },
+    async exportReserves() {
+      try {
+        const r = await fetch('/api/export/reserves')
+        if (!r.ok) { this.toast('导出失败', 'err'); return }
+        const blob = await r.blob()
+        const url = URL.createObjectURL(blob)
+        const a = document.createElement('a'); a.href = url; a.download = 'reserves.csv'; document.body.appendChild(a); a.click()
+        setTimeout(() => { URL.revokeObjectURL(url); a.remove() }, 1000)
+        this.toast('已导出 reserves.csv', 'ok')
+      } catch (e) { this.toast('导出失败', 'err') }
     },
 
     async loadSettings() { const s = await this.api('/api/settings'); if (s && !s.error) Object.assign(this.settings, s); this.musicList = await this.api('/api/music') || [] },

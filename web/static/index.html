@@ -31,14 +31,18 @@
     <div class="toolbar">
       <h2>配置</h2>
       <button class="primary" @click="newProfile">＋ 新建配置</button>
+      <button class="sm" :class="{on:bulkMode}" @click="bulkMode=!bulkMode">{{bulkMode?'取消':'批量选择'}}</button>
+      <button class="sm" v-if="bulkMode" @click="toggleSelectAll">{{allSelected?'取消全选':'全选'}}</button>
+      <button class="sm danger" v-if="bulkMode && selectedProfiles.length" @click="clearProxiesBatch">改直连 ({{selectedProfiles.length}})</button>
       <button class="ghost sm" @click="loadProfiles">刷新</button>
     </div>
     <div v-if="!profiles.length" class="empty">
       <div class="big">＋</div>还没有配置 —— 点「新建配置」扫码登录、选场次,开始抢票。
     </div>
     <div class="cards">
-      <div class="card" v-for="p in profiles" :key="p.name">
+      <div class="card" v-for="p in profiles" :key="p.name" :class="{selected:selectedSet.has(p.name)}" @click="bulkMode && toggleSelect(p.name)">
         <div class="card-h">
+          <input type="checkbox" v-if="bulkMode" class="bulk-chk" :checked="selectedSet.has(p.name)" @click.stop="toggleSelect(p.name)">
           <div class="avatar"><span>{{(p.uname||'?').slice(0,1)}}</span><img v-if="p.face" :src="p.face" referrerpolicy="no-referrer" @error="$event.target.style.display='none'"></div>
           <div>
             <div class="nm">{{p.name}}</div>
@@ -118,6 +122,7 @@
           <div class="sess-bar">
             <input class="full" v-model="sessQ" placeholder="搜索场次/日期">
             <button class="sm" @click="selectAllSessions">全选可抢</button>
+            <button class="sm" @click="clearAllSessions">取消全选</button>
             <span class="muted small">已选 {{selCount}} / 共 {{sessions.length}}</span>
           </div>
           <div class="muted small" v-if="sessLoading" style="padding:8px 0">加载场次中…</div>
@@ -138,6 +143,7 @@
           <h2>抢票设置</h2>
           <label class="field">基础发包间隔(ms)<input type="number" v-model.number="draft.base_interval"></label>
           <label class="field">提前发包(填数字=固定 ms;填 <b>auto</b>=按网络延迟自适应,默认)<input v-model="draft.offset" placeholder="auto"></label>
+          <label class="field">单任务抢购时长(ms)(从开抢起算,超时自动停止)<input type="number" v-model.number="draft.grab_window_ms" placeholder="5000"></label>
           <div class="field" style="margin-bottom:4px;color:var(--txt)">暂停条件(命中后)</div>
           <label class="field">预约成功
             <select v-model="draft.stop_policy.success">
@@ -238,7 +244,7 @@
   </main>
 
   <main v-else-if="view==='tickets'" key="tickets">
-    <div class="toolbar"><h2>场次信息</h2><select v-model="ticketProfile" @change="loadTickets"><option v-for="p in profiles" :value="p.name">{{p.name}}</option></select><button class="ghost sm" @click="loadTickets">刷新</button></div>
+    <div class="toolbar"><h2>场次信息</h2><select v-model="ticketProfile" @change="loadTickets"><option v-for="p in profiles" :value="p.name">{{p.name}}</option></select><button class="ghost sm" @click="loadTickets">刷新</button><button class="ghost sm" @click="exportReserves">导出已预约</button></div>
     <div v-if="ticketLoading" class="muted">查询中…</div>
     <div v-else-if="tickets" class="panel">
       <h3>{{ticketProfile}} · 共 {{tickets.length}} 个场次</h3>
@@ -249,6 +255,16 @@
           <td class="muted wrap">{{t.location||'—'}}</td><td>{{fmtAct(t.act_begin, t.act_end)}}</td><td class="muted">{{t.begin?fmtTs(t.begin):'—'}}</td>
           <td class="r">{{t.stock!=null?t.stock+'/'+t.total:'—'}}</td><td>{{t.ticket_no||'—'}}</td>
           <td><span class="pill" :class="t.reserved?'p-win':(t.ticket_no?'':'p-stop')">{{t.reserved?'已预约':(t.ticket_no?'未预约':'无票')}}</span></td>
+        </tr></tbody></table></div>
+    </div>
+    <div v-if="!ticketLoading && myReserves" class="panel" style="margin-top:16px">
+      <h3>已预约场次 · 共 {{myReserves.length}} 个</h3>
+      <div class="muted small" v-if="!myReserves.length">暂无已预约场次</div>
+      <div class="sess-wrap" v-else><table class="tbl"><thead><tr><th>日期</th><th>类型</th><th>场次 / 商品</th><th>地点</th><th>活动时间</th><th>开抢时间</th><th>票号</th></tr></thead>
+        <tbody><tr v-for="t in myReserves" :key="t.reserve_id">
+          <td>{{fmtDate(t.date)}}</td><td class="muted">{{t.type_name||'—'}}</td><td class="wrap">{{t.title}}</td>
+          <td class="muted wrap">{{t.location||'—'}}</td><td>{{fmtAct(t.act_begin, t.act_end)}}</td><td class="muted">{{t.begin?fmtTs(t.begin):'—'}}</td>
+          <td>{{t.ticket_no||'—'}}</td>
         </tr></tbody></table></div>
     </div>
   </main>
